@@ -1,6 +1,8 @@
 """
 Pytom Canvas Love
 Karya generatif: hati putih bercahaya dari partikel di atas latar hitam pekat.
+Detail: firework tipis di samping hati, riak detak, cincin orbit, bintang jatuh,
+bara naik, dan vignette halus.
 
 Install : pip install pygame numpy
 Jalankan: python pytom_canvas_love.py
@@ -19,6 +21,10 @@ FPS = 60
 BEAT_PERIOD = 1.9          # detik per detak (lub-dub)
 MOUSE_RADIUS = 120         # jangkauan dorongan kursor (px)
 WAVE_SPEED, WAVE_LIFE = 420.0, 1.8
+RIPPLE_LIFE = 1.8                      # umur riak detak (detik)
+STAR_SPEED, STAR_LIFE = 800.0, 0.8     # bintang jatuh
+FW_KINDS = ("peony", "willow", "ring", "heart")
+FW_WEIGHTS = (0.40, 0.25, 0.20, 0.15)
 
 
 # ----------------------------------------------------------------- util
@@ -66,6 +72,7 @@ class Love:
         self.cx, self.cy = w / 2, h / 2
         self.frame = pygame.Surface((w, h))
         self.lay = pygame.Surface((w, h))
+        self.vig = self._make_vignette(w, h)
         if ow:  # sesuaikan posisi debu bintang saat resize
             self.dx *= w / ow
             self.dy *= h / oh
@@ -102,6 +109,7 @@ class Love:
         s3 = r.uniform(1.0, 1.9, n_flow)
 
         self.ns = n_in + n_rim  # jumlah partikel statis
+        self.n_in = n_in
         self.n = self.ns + n_flow
         self.ux = np.concatenate([ux1, ux2, ux3])
         self.uy = np.concatenate([uy1, uy2, uy3])
@@ -149,6 +157,10 @@ class Love:
         self.t = 0.0
         self.waves, self.bursts, self.sparks = [], [], []
         self.next_spark = 3.0
+        # detail tambahan
+        self.ripples, self.rockets, self.fwp, self.fw_booms, self.embers = [], [], [], [], []
+        self.star, self.next_star = None, 8.0
+        self.next_fw, self.fw_side, self.prev_p = 4.0, 1, 0.0
 
     # --- simulasi
     def burst(self, x, y):
@@ -158,7 +170,7 @@ class Love:
             a, s = self.rng.uniform(0, TAU), self.rng.uniform(120, 380)
             self.bursts.append([x, y, math.cos(a) * s, math.sin(a) * s, 0.0, self.rng.uniform(0.9, 1.8)])
 
-    def update(self, dt, bs):
+    def update(self, dt, bs, tick=False):
         t = self.t
         # partikel flow: maju sepanjang kontur
         self.ft += self.fsp * dt
@@ -233,6 +245,8 @@ class Love:
             s[1] += dt
         self.sparks = [s for s in self.sparks if s[1] < s[2]]
 
+        self._update_extras(dt, tick)
+
     # --- render
     def draw(self, b, bs, rv, rv2):
         W, H, t, U = self.W, self.H, self.t, self.U
@@ -254,6 +268,12 @@ class Love:
             X.append(bu[:, 0])
             Y.append(bu[:, 1])
             wt.append((1 - bu[:, 4] / bu[:, 5]) ** 1.5 * 0.9)
+
+        ex = self._extra_points()
+        if ex:
+            X.append(ex[0])
+            Y.append(ex[1])
+            wt.append(ex[2])
 
         X, Y, Wt = np.concatenate(X), np.concatenate(Y), np.concatenate(wt)
         x0, y0 = np.floor(X).astype(np.int32), np.floor(Y).astype(np.int32)
@@ -316,6 +336,7 @@ class Love:
             if r > 1:
                 pygame.draw.circle(lay, grey(255 * 0.22 * (1 - wt_ / WAVE_LIFE)), (wx, wy), r, 1)
 
+        self._draw_extras(lay, b, rv, rv2, contour)
         self.frame.blit(lay, (0, 0), special_flags=pygame.BLEND_ADD)
 
         # 3) glow berlapis (bloom), berdenyut mengikuti detak
@@ -327,8 +348,207 @@ class Love:
             pygame.surfarray.blit_array(s, np.minimum(arr, 255).astype(np.uint8))
             self.frame.blit(pygame.transform.smoothscale(s, (W, H)), (0, 0), special_flags=pygame.BLEND_ADD)
 
+        self.frame.blit(self.vig, (0, 0), special_flags=pygame.BLEND_RGB_MULT)  # vignette
         self.screen.blit(self.frame, (0, 0))
         pygame.display.flip()
+
+    # --- detail tambahan -------------------------------------------------
+    def _make_vignette(self, w, h):
+        xs = (np.arange(w) - w / 2) / (w / 2)
+        ys = (np.arange(h) - h / 2) / (h / 2)
+        r = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)
+        g = ((1 - 0.55 * smooth((r - 0.6) / 0.85)) * 255).astype(np.uint8)
+        v = pygame.Surface((w, h))
+        pygame.surfarray.blit_array(v, np.stack([g, g, g], axis=-1))
+        return v
+
+    def _fw_zone(self):
+        """Titik ledakan di ruang kosong samping hati (atau atas/bawah di layar sempit)."""
+        W, H, U, rng = self.W, self.H, self.U, self.rng
+        self.fw_side *= -1
+        free_x = self.cx - 16 * U * 1.06
+        if free_x >= 90:
+            zx = self.cx + self.fw_side * (16 * U * 1.06 + free_x / 2)
+            zy = self.cy + rng.uniform(-0.28, 0.05) * H
+            R = min(free_x * 0.42, H * 0.2, 150)
+            return zx, zy, R, zx + rng.uniform(-0.03, 0.03) * W, H + 10
+        free_y = self.cy - 14.5 * U * 1.06
+        if free_y < 50:
+            return None
+        zx = self.cx + rng.uniform(-0.25, 0.25) * W
+        zy = free_y * 0.5 if self.fw_side > 0 else H - free_y * 0.5
+        return zx, zy, min(W * 0.22, free_y * 0.42, 120), zx, H + 10
+
+    def _explode(self, x, y, kind, R):
+        r = self.rng
+        if kind == "willow":
+            n, m, g, drag = 30, 2.1, 130.0, 1.7
+            sp = R * 1.6 * r.uniform(0.5, 1.0, n)
+            ang = r.uniform(0, TAU, n)
+            vx, vy = np.cos(ang) * sp, np.sin(ang) * sp
+        elif kind == "ring":
+            n, m, g, drag = 40, 1.4, 30.0, 2.2
+            ang = np.arange(n) * TAU / n + r.uniform(-0.03, 0.03, n)
+            vx, vy = np.cos(ang) * R * 2.2, np.sin(ang) * R * 2.2
+        elif kind == "heart":  # ledakan mini berbentuk hati
+            n, m, g, drag = 40, 1.5, 20.0, 2.2
+            tt = np.arange(n) * TAU / n
+            vx, vy = hx(tt, 1.0) / 17 * R * 2.2, hy(tt, 1.0) / 17 * R * 2.2
+        else:  # peony
+            n, m, g, drag = 36, 1.4, 40.0, 2.2
+            sp = R * 2.2 * r.uniform(0.8, 1.0, n)
+            ang = r.uniform(0, TAU, n)
+            vx, vy = np.cos(ang) * sp, np.sin(ang) * sp
+        for i in range(n):
+            self.fwp.append([x, y, float(vx[i]), float(vy[i]), 0.0, m, g, drag,
+                             r.uniform(0.35, 0.55), r.uniform(0, TAU)])
+
+    @staticmethod
+    def _spark_alpha(s):
+        f = s[4] / s[5]
+        a = s[8] * (1 - f) ** 1.4
+        return a * (0.6 + 0.4 * math.sin(s[4] * 38 + s[9])) if f > 0.6 else a  # bara berkelip di akhir
+
+    def _update_extras(self, dt, tick):
+        t, rng, W, H = self.t, self.rng, self.W, self.H
+        self.fw_booms = [x for x in self.fw_booms if t - x < 1.5]
+        self.ripples = [x for x in self.ripples if t - x < RIPPLE_LIFE]
+
+        if tick and t > 3.0:
+            self.ripples.append(t + 0.19)  # riak muncul tepat di puncak "lub"
+            for _ in range(int(rng.integers(5, 10))):  # bara naik dari tepi hati
+                if len(self.embers) < 40:
+                    i = int(rng.integers(self.n_in, self.ns))
+                    self.embers.append([self.px[i], self.py[i], rng.uniform(-14, 14),
+                                        rng.uniform(-60, -28), 0.0, rng.uniform(2.0, 3.2), rng.uniform(0, TAU)])
+            if t >= self.next_fw and len(self.rockets) + len(self.fw_booms) < 2:
+                z = self._fw_zone()
+                if z:
+                    zx, zy, R, x0, y0 = z
+                    kind = str(rng.choice(FW_KINDS, p=FW_WEIGHTS))
+                    self.rockets.append([x0, y0, zx, zy, 0.0, 0.8 + 0.5 * abs(y0 - zy) / H, kind, R, []])
+                    self.next_fw = t + rng.uniform(2.5, 4.0)
+
+        alive = []
+        for rk in self.rockets:
+            rk[4] += dt
+            p = min(1.0, rk[4] / rk[5])
+            e = 1 - (1 - p) ** 2
+            x = rk[0] + (rk[2] - rk[0]) * e + math.sin(p * 9) * 3 * (1 - p)
+            y = rk[1] + (rk[3] - rk[1]) * e
+            rk[8].append((x, y))
+            del rk[8][:-14]
+            if p >= 1.0:
+                self._explode(x, y, rk[6], rk[7])
+                self.fw_booms.append(t)
+            else:
+                alive.append(rk)
+        self.rockets = alive
+
+        for s in self.fwp:
+            k = math.exp(-s[7] * dt)
+            s[2] *= k
+            s[3] = (s[3] + s[6] * dt) * k
+            s[0] += s[2] * dt
+            s[1] += s[3] * dt
+            s[4] += dt
+        self.fwp = [s for s in self.fwp if s[4] < s[5]]
+
+        for em in self.embers:
+            em[4] += dt
+            em[2] += math.sin(em[4] * 3 + em[6]) * 10 * dt
+            em[0] += em[2] * dt
+            em[1] += em[3] * dt
+        self.embers = [em for em in self.embers if em[4] < em[5]]
+
+        if self.star is None:
+            if t > 6 and t >= self.next_star:
+                ang = rng.uniform(0.35, 0.6)
+                sgn = 1 if rng.uniform() < 0.5 else -1
+                self.star = [rng.uniform(0.15, 0.85) * W, rng.uniform(0.02, 0.22) * H,
+                             sgn * math.cos(ang), math.sin(ang), 0.0]
+        else:
+            s = self.star
+            s[4] += dt
+            s[0] += s[2] * STAR_SPEED * dt
+            s[1] += s[3] * STAR_SPEED * dt
+            if s[4] > STAR_LIFE:
+                self.star, self.next_star = None, t + rng.uniform(10, 15)
+
+    def _extra_points(self):
+        xs, ys, ws = [], [], []
+        for s in self.fwp:
+            xs.append(s[0]); ys.append(s[1]); ws.append(self._spark_alpha(s) * 1.3)
+        for e in self.embers:
+            f = e[4] / e[5]
+            a = 0.85 * (1 - f) ** 1.3 * (0.7 + 0.3 * math.sin(e[4] * 6 + e[6])) * min(1.0, e[4] / 0.15)
+            xs.append(e[0]); ys.append(e[1]); ws.append(a * 1.3)
+        if not xs:
+            return None
+        return np.array(xs), np.array(ys), np.array(ws)
+
+    def _draw_extras(self, lay, b, rv, rv2, contour):
+        t = self.t
+        # riak detak: kontur hati yang memuai lalu memudar
+        for t0 in self.ripples:
+            pr = (t - t0) / RIPPLE_LIFE
+            if 0 <= pr < 1:
+                k = 1.0 + 0.55 * (1 - (1 - pr) ** 2)
+                pygame.draw.aalines(lay, grey(255 * 0.2 * (1 - pr) ** 1.5 * rv), True, contour(k, 140))
+
+        self._draw_orbit(lay, b, rv2)
+
+        # firework: garis peluncur tipis + ekor percikan
+        for rk in self.rockets:
+            tr = rk[8]
+            for i in range(len(tr) - 1):
+                pygame.draw.line(lay, grey(255 * 0.35 * i / len(tr)), tr[i], tr[i + 1])
+            if tr:
+                pygame.draw.circle(lay, grey(200), tr[-1], 1)
+        for s in self.fwp:
+            c = grey(255 * self._spark_alpha(s) * 0.5)
+            pygame.draw.line(lay, c, (s[0] - s[2] * 0.06, s[1] - s[3] * 0.06), (s[0], s[1]))
+
+        # bintang jatuh
+        if self.star:
+            x, y, dx, dy, l = self.star
+            fade = math.sin(math.pi * min(l, STAR_LIFE) / STAR_LIFE) ** 0.7
+            L = 140
+            for i in range(10):
+                pygame.draw.aaline(lay, grey(255 * 0.8 * (1 - i / 10) * fade),
+                                   (x - dx * L * i / 10, y - dy * L * i / 10),
+                                   (x - dx * L * (i + 1) / 10, y - dy * L * (i + 1) / 10))
+            pygame.draw.circle(lay, grey(255 * fade), (x, y), 1)
+
+    def _draw_orbit(self, lay, b, rv2):
+        """Dua cincin putus-putus yang berputar pelan + titik cahaya berekor komet."""
+        if rv2 < 0.01:
+            return
+        t, U = self.t, self.U
+        lim = min(self.W, self.H) * 0.46
+        rings = ((min(20.5 * U, lim * 0.85), 1.0, 0.0, 0.05, 96, 0.10, 0.35),
+                 (min(24.5 * U, lim), 0.86, -0.35, -0.035, 120, 0.07, -0.28))
+        for rad, ratio, tilt, dash_sp, nd, lum, dot_sp in rings:
+            rad *= 1 + 0.012 * b
+            ct, st = math.cos(tilt), math.sin(tilt)
+
+            def pt(a):
+                ex, ey = rad * math.cos(a), rad * ratio * math.sin(a)
+                return self.cx + ex * ct - ey * st, self.cy + ex * st + ey * ct
+
+            col, step = grey(255 * lum * rv2), TAU / nd
+            for i in range(nd):
+                a0 = i * step + t * dash_sp
+                pygame.draw.aaline(lay, col, pt(a0), pt(a0 + step * 0.5))
+            sg = 1 if dot_sp > 0 else -1
+            for off in ((0.0, math.pi) if ratio == 1.0 else (0.0,)):
+                a = t * dot_sp + off
+                for q in range(10):  # ekor komet
+                    pygame.draw.aaline(lay, grey(255 * 0.7 * rv2 * (1 - q / 10)),
+                                       pt(a - sg * q * 0.03), pt(a - sg * (q + 1) * 0.03))
+                hp = pt(a)
+                pygame.draw.circle(lay, grey(255 * 0.12 * rv2), hp, 5)
+                pygame.draw.circle(lay, grey(255 * 0.9 * rv2), hp, 2)
 
     # --- jendela
     def toggle_fullscreen(self):
@@ -359,11 +579,13 @@ class Love:
 
             self.t += dt
             p = (self.t % BEAT_PERIOD) / BEAT_PERIOD
+            tick = p < self.prev_p  # awal detak baru
+            self.prev_p = p
             b = (gauss(p, 0.1, 0.06) + 0.65 * gauss(p, 0.3, 0.07)) * float(smooth(self.t / 2.5))
             bs = 1 + 0.04 * b + 0.006 * math.sin(self.t * 0.5)
             rv = float(smooth((self.t - 2.4) / 3))
             rv2 = float(smooth((self.t - 3.2) / 2.5))
-            self.update(dt, bs)
+            self.update(dt, bs, tick)
             self.draw(b, bs, rv, rv2)
 
 
