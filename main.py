@@ -1,8 +1,9 @@
 """
 Pytom Canvas Love
 Karya generatif: hati putih bercahaya dari partikel di atas latar hitam pekat.
-Detail: firework tipis di samping hati, riak detak, cincin orbit, bintang jatuh,
-bara naik, dan vignette halus.
+Intro : benang kusut acak-acakan yang perlahan terurai lalu membentuk hati.
+Detail: firework warna-warni di samping hati, riak detak, cincin orbit,
+        bintang jatuh, bara naik, dan vignette halus.
 
 Install : pip install pygame numpy
 Jalankan: python pytom_canvas_love.py
@@ -26,6 +27,17 @@ STAR_SPEED, STAR_LIFE = 800.0, 0.8     # bintang jatuh
 FW_KINDS = ("peony", "willow", "ring", "heart")
 FW_WEIGHTS = (0.40, 0.25, 0.20, 0.15)
 
+# fase intro: benang kusut -> hati
+N_THREADS = 18
+THREAD_K = np.array([1.0] * 4 + list(np.linspace(0.92, 0.10, 14)))  # skala kontur tiap benang
+FORM_START, FORM_U, FORM_DUR = 1.6, 2.2, 2.4   # mulai terurai, sebaran sepanjang benang, lama transisi
+T_BEAT, T_RV, T_RV2, T_FX = 6.3, 6.0, 7.0, 8.5  # detak, kontur, konstelasi, efek tambahan mulai muncul
+
+# warna firework (RGB 0..1)
+COLORS = ((0.30, 0.58, 1.00), (1.00, 0.27, 0.31), (1.00, 0.85, 0.30), (0.35, 1.00, 0.60),
+          (1.00, 0.35, 0.78), (1.00, 0.60, 0.24), (0.30, 0.90, 1.00), (0.67, 0.43, 1.00))
+HEART_COLORS = (COLORS[1], COLORS[4], (1.00, 0.50, 0.60))
+
 
 # ----------------------------------------------------------------- util
 def smooth(x):
@@ -43,6 +55,11 @@ def hx(t, k):  # kurva hati parametrik, dipusatkan pada bounding box
 
 def hy(t, k):
     return -(13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t) + 2.5) * k
+
+
+def tint(c, v):
+    """Warna c (RGB 0..1) dengan kecerahan v (0..1) -> tuple int untuk pygame."""
+    return tuple(int(max(0, min(255, 255 * v * x))) for x in c)
 
 
 def grey(v):
@@ -87,6 +104,8 @@ class Love:
         t = r.uniform(0, TAU, n_in)
         k = np.sqrt(r.uniform(0, 1, n_in))
         ux1, uy1 = hx(t, k), hy(t, k)
+        u1 = t / TAU
+        j1 = 4 + np.abs(k[:, None] - THREAD_K[None, 4:]).argmin(axis=1)
         tone1 = r.choice([1.0, 0.82, 0.62], n_in, p=[0.55, 0.30, 0.15])
         a1 = (0.22 + 0.5 * r.uniform(0, 1, n_in)) * (0.55 + 0.45 * k)
         s1 = r.uniform(0.5, 1.2, n_in)
@@ -96,6 +115,8 @@ class Love:
         k = 1 - r.uniform(0, 1, n_rim) ** 3 * 0.05
         ux2 = hx(t, k) + r.uniform(-0.14, 0.14, n_rim)
         uy2 = hy(t, k) + r.uniform(-0.14, 0.14, n_rim)
+        u2 = t / TAU
+        j2 = r.integers(0, 4, n_rim)
         tone2 = r.choice([1.0, 0.82], n_rim, p=[0.7, 0.3])
         a2 = r.uniform(0.55, 0.95, n_rim)
         s2 = r.uniform(0.7, 1.5, n_rim)
@@ -105,6 +126,9 @@ class Love:
         self.fk = np.array([1.0, 1.0, 0.93, 0.86])[np.arange(n_flow) % 4]
         self.fsp = np.where(r.uniform(0, 1, n_flow) < 0.78, 1, -1) * r.uniform(0.16, 0.4, n_flow)
         ux3, uy3 = hx(self.ft, self.fk), hy(self.ft, self.fk)
+        u3 = self.ft / TAU
+        j3 = np.where(self.fk >= 0.99, r.integers(0, 4, n_flow),
+                      4 + np.abs(self.fk[:, None] - THREAD_K[None, 4:]).argmin(axis=1))
         a3 = r.uniform(0.7, 1.0, n_flow)
         s3 = r.uniform(1.0, 1.9, n_flow)
 
@@ -116,7 +140,16 @@ class Love:
         self.tone = np.concatenate([tone1, tone2, np.ones(n_flow)])
         self.alpha = np.concatenate([a1, a2, a3])
         self.size = np.concatenate([s1, s2, s3])
-        self.dl = np.concatenate([r.uniform(0, 2.8, self.ns), r.uniform(1.5, 3.4, n_flow)])
+        # tiap partikel menempel pada satu benang (j) di posisi u; benang terurai dari ujung ke ujung
+        self.pj = np.concatenate([j1, j2, j3])
+        self.pu = np.concatenate([u1, u2, u3]) % 1.0
+        self.dl = 0.08 * self.pj + FORM_U * self.pu + r.uniform(0, 0.3, self.n)
+        # parameter gumpalan benang kusut: 3 gelombang sinus per sumbu, frekuensi bulat -> kurva tertutup
+        self.cf = r.integers(1, 6, (N_THREADS, 2, 3)).astype(float)
+        self.cp = r.uniform(0, TAU, (N_THREADS, 2, 3))
+        self.cs = r.uniform(-0.6, 0.6, (N_THREADS, 2, 3))
+        self.co = r.uniform(-0.12, 0.12, (N_THREADS, 2))
+        self.cam = r.uniform(0.55, 1.0, (N_THREADS, 2))
         self.ph = r.uniform(0, TAU, self.n)
         self.ts = r.uniform(0.4, 1.5, self.n)
 
@@ -146,21 +179,18 @@ class Love:
         self.replay()
 
     def replay(self):
-        """Sebar partikel lalu biarkan berkumpul membentuk hati."""
-        r = self.rng
-        ang = r.uniform(0, TAU, self.n)
-        dist = r.uniform(0.2, 0.9, self.n) * max(self.W, self.H)
-        self.px = self.cx + np.cos(ang) * dist
-        self.py = self.cy + np.sin(ang) * dist
-        self.vx, self.vy = r.uniform(-14, 14, self.n), r.uniform(-14, 14, self.n)
+        """Mulai dari gumpalan benang kusut, lalu biarkan terurai membentuk hati."""
+        self.px, self.py = self._chaos(self.pj, self.pu, 0.0)
+        self.vx, self.vy = np.zeros(self.n), np.zeros(self.n)
         self.e = np.zeros(self.n)
         self.t = 0.0
         self.waves, self.bursts, self.sparks = [], [], []
-        self.next_spark = 3.0
+        self.next_spark = T_FX - 0.5
         # detail tambahan
         self.ripples, self.rockets, self.fwp, self.fw_booms, self.embers = [], [], [], [], []
-        self.star, self.next_star = None, 8.0
-        self.next_fw, self.fw_side, self.prev_p = 4.0, 1, 0.0
+        self.flashes = []
+        self.star, self.next_star = None, T_FX + 2.5
+        self.next_fw, self.fw_side, self.prev_p = T_FX + 0.5, 1, 0.0
 
     # --- simulasi
     def burst(self, x, y):
@@ -177,11 +207,15 @@ class Love:
         self.ux[self.ns:] = hx(self.ft, self.fk)
         self.uy[self.ns:] = hy(self.ft, self.fk)
 
-        e = self.e = smooth((t - self.dl) / 1.7)
-        tx = self.cx + self.ux * self.U * bs + np.sin(t * 0.7 + self.ph) * 0.9 * e
-        ty = self.cy + self.uy * self.U * bs + np.cos(t * 0.6 + self.ph) * 0.9 * e
-        ax = (tx - self.px) * (10 * e + 0.015)
-        ay = (ty - self.py) * (10 * e + 0.015)
+        e = self.e = smooth((t - FORM_START - self.dl) / FORM_DUR)  # 0 = benang kusut, 1 = hati
+        cxp, cyp = self._chaos(self.pj, self.pu, t)
+        sw = np.sin(np.pi * e) * 40  # lilitan kecil saat benang terurai
+        tx = (cxp * (1 - e) + (self.cx + self.ux * self.U * bs + np.sin(t * 0.7 + self.ph) * 0.9) * e
+              + sw * np.sin(self.ph + t * 1.3))
+        ty = (cyp * (1 - e) + (self.cy + self.uy * self.U * bs + np.cos(t * 0.6 + self.ph) * 0.9) * e
+              + sw * np.cos(self.ph + t * 1.1))
+        ax = (tx - self.px) * 10
+        ay = (ty - self.py) * 10
 
         if pygame.mouse.get_focused():
             mx, my = pygame.mouse.get_pos()
@@ -204,8 +238,9 @@ class Love:
             w[2] += dt
         self.waves = [w for w in self.waves if w[2] < WAVE_LIFE]
 
-        self.vx = (self.vx + ax * dt) * np.exp(-(0.4 + 3.8 * e) * dt)
-        self.vy = (self.vy + ay * dt) * np.exp(-(0.4 + 3.8 * e) * dt)
+        dm = math.exp(-4.2 * dt)
+        self.vx = (self.vx + ax * dt) * dm
+        self.vy = (self.vy + ay * dt) * dm
         self.px += self.vx * dt
         self.py += self.vy * dt
 
@@ -250,10 +285,11 @@ class Love:
     # --- render
     def draw(self, b, bs, rv, rv2):
         W, H, t, U = self.W, self.H, self.t, self.U
+        intro = float(smooth(t / 0.8))
 
         # 1) partikel (anti-aliased, akumulasi bilinear ke buffer kecerahan)
         tw = 0.62 + 0.38 * np.sin(t * self.ts + self.ph)
-        a = np.minimum(1, self.alpha * self.tone * tw * (0.92 + 0.22 * b) * (0.3 + 0.7 * self.e))
+        a = np.minimum(1, self.alpha * self.tone * tw * (0.92 + 0.22 * b) * (0.5 + 0.5 * self.e) * intro)
         wt = [a * (0.7 + 0.8 * self.size)]
         X, Y = [self.px], [self.py]
 
@@ -287,7 +323,11 @@ class Love:
             wts.append((Wt * w)[m])
         buf = np.bincount(np.concatenate(idx), np.concatenate(wts), minlength=W * H).reshape(W, H)
         g = (np.clip(buf, 0, 1) * 255).astype(np.uint8)
-        pygame.surfarray.blit_array(self.frame, np.stack([g, g, g], axis=-1))
+        rgb = np.stack([g, g, g], axis=-1)
+        cp = self._color_points()
+        if cp:
+            self._splat_color(rgb, *cp)  # percikan firework berwarna
+        pygame.surfarray.blit_array(self.frame, rgb)
 
         # 2) garis: kontur berlapis, siluet, konstelasi, sparkle, ring gelombang
         lay = self.lay
@@ -298,6 +338,7 @@ class Love:
             tt = np.linspace(0, TAU, n)
             return np.column_stack((cx + hx(tt, k) * U * bs, cy + hy(tt, k) * U * bs)).tolist()
 
+        self._draw_threads(lay, intro)
         for i, k in enumerate((0.86, 0.72, 0.58, 0.44, 0.31, 0.19)):
             kk = k * (1 + 0.006 * math.sin(t * 0.8 + i))
             v = 255 * (0.12 - i * 0.012) * rv * (0.8 + 0.5 * b)
@@ -342,7 +383,7 @@ class Love:
         # 3) glow berlapis (bloom), berdenyut mengikuti detak
         s1 = pygame.transform.smoothscale(self.frame, (max(1, W // 4), max(1, H // 4)))
         s2 = pygame.transform.smoothscale(s1, (max(1, W // 12), max(1, H // 12)))
-        gate = 0.4 + 0.6 * rv
+        gate = 0.55 + 0.45 * rv
         for s, gain in ((s1, (1.9 + 0.9 * b) * gate), (s2, (3.2 + 1.8 * b) * gate)):
             arr = pygame.surfarray.array3d(s).astype(np.float32) * gain
             pygame.surfarray.blit_array(s, np.minimum(arr, 255).astype(np.uint8))
@@ -351,6 +392,59 @@ class Love:
         self.frame.blit(self.vig, (0, 0), special_flags=pygame.BLEND_RGB_MULT)  # vignette
         self.screen.blit(self.frame, (0, 0))
         pygame.display.flip()
+
+    # --- intro benang kusut
+    def _chaos(self, j, u, t):
+        """Posisi titik pada benang j (parameter u 0..1) di gumpalan benang yang menggeliat."""
+        a = TAU * u[:, None, None] * self.cf[j] + self.cp[j] + t * self.cs[j]  # (n, sumbu, gelombang)
+        sv = (np.sin(a) * np.array([0.55, 0.30, 0.15])).sum(-1)               # (n, sumbu)
+        x = self.cx + self.co[j, 0] * self.W + self.cam[j, 0] * 0.38 * self.W * sv[:, 0]
+        y = self.cy + self.co[j, 1] * self.H + self.cam[j, 1] * 0.38 * self.H * sv[:, 1]
+        return x, y
+
+    def _draw_threads(self, lay, intro):
+        """Garis benang tipis: kusut di awal, lalu perlahan menjadi kontur hati dan memudar."""
+        t, M = self.t, 120
+        j = np.repeat(np.arange(N_THREADS), M)
+        u = np.tile(np.linspace(0, 1, M), N_THREADS)
+        e = smooth((t - FORM_START - (0.08 * j + FORM_U * u)) / FORM_DUR)
+        cxp, cyp = self._chaos(j, u, t)
+        tt = u * TAU
+        X = (cxp * (1 - e) + (self.cx + hx(tt, THREAD_K[j]) * self.U) * e).reshape(N_THREADS, M)
+        Y = (cyp * (1 - e) + (self.cy + hy(tt, THREAD_K[j]) * self.U) * e).reshape(N_THREADS, M)
+        em = e.reshape(N_THREADS, M).mean(1)
+        for i in range(N_THREADS):
+            v = 255 * 0.30 * (1 - em[i]) ** 0.8 * intro
+            if v >= 2:
+                pygame.draw.aalines(lay, grey(v), False, np.column_stack((X[i], Y[i])).tolist())
+
+    # --- firework berwarna
+    def _color_points(self):
+        if not self.fwp:
+            return None
+        return (np.array([s[0] for s in self.fwp]), np.array([s[1] for s in self.fwp]),
+                np.array([self._spark_alpha(s) * 1.8 for s in self.fwp]),
+                np.array([s[10] for s in self.fwp]) * 255)
+
+    def _splat_color(self, rgb, X, Y, Wt, C):
+        W, H = self.W, self.H
+        x0, y0 = np.floor(X).astype(np.int64), np.floor(Y).astype(np.int64)
+        fx, fy = X - x0, Y - y0
+        ids, vals = [], []
+        for ox, oy, w in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)),
+                          (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+            xi, yi = x0 + ox, y0 + oy
+            m = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+            ids.append(xi[m] * H + yi[m])
+            vals.append(((Wt * w)[m])[:, None] * C[m])
+        ids, vals = np.concatenate(ids), np.concatenate(vals)
+        if not len(ids):
+            return
+        uniq, inv = np.unique(ids, return_inverse=True)
+        sums = np.zeros((len(uniq), 3))
+        np.add.at(sums, inv, vals)
+        ux_, uy_ = uniq // H, uniq % H
+        rgb[ux_, uy_] = np.minimum(255, rgb[ux_, uy_].astype(np.float32) + sums).astype(np.uint8)
 
     # --- detail tambahan -------------------------------------------------
     def _make_vignette(self, w, h):
@@ -379,8 +473,9 @@ class Love:
         zy = free_y * 0.5 if self.fw_side > 0 else H - free_y * 0.5
         return zx, zy, min(W * 0.22, free_y * 0.42, 120), zx, H + 10
 
-    def _explode(self, x, y, kind, R):
+    def _explode(self, x, y, kind, R, cols):
         r = self.rng
+        self.flashes.append([x, y, 0.0, R, cols[0]])
         if kind == "willow":
             n, m, g, drag = 30, 2.1, 130.0, 1.7
             sp = R * 1.6 * r.uniform(0.5, 1.0, n)
@@ -401,7 +496,7 @@ class Love:
             vx, vy = np.cos(ang) * sp, np.sin(ang) * sp
         for i in range(n):
             self.fwp.append([x, y, float(vx[i]), float(vy[i]), 0.0, m, g, drag,
-                             r.uniform(0.35, 0.55), r.uniform(0, TAU)])
+                             r.uniform(0.55, 0.85), r.uniform(0, TAU), cols[i % len(cols)]])
 
     @staticmethod
     def _spark_alpha(s):
@@ -414,7 +509,7 @@ class Love:
         self.fw_booms = [x for x in self.fw_booms if t - x < 1.5]
         self.ripples = [x for x in self.ripples if t - x < RIPPLE_LIFE]
 
-        if tick and t > 3.0:
+        if tick and t > T_FX:
             self.ripples.append(t + 0.19)  # riak muncul tepat di puncak "lub"
             for _ in range(int(rng.integers(5, 10))):  # bara naik dari tepi hati
                 if len(self.embers) < 40:
@@ -426,7 +521,12 @@ class Love:
                 if z:
                     zx, zy, R, x0, y0 = z
                     kind = str(rng.choice(FW_KINDS, p=FW_WEIGHTS))
-                    self.rockets.append([x0, y0, zx, zy, 0.0, 0.8 + 0.5 * abs(y0 - zy) / H, kind, R, []])
+                    if kind == "heart":
+                        cols = [HEART_COLORS[int(rng.integers(0, 3))]]
+                    else:  # satu warna, atau dua warna berpadu
+                        ci = rng.choice(len(COLORS), 2, replace=False)
+                        cols = [COLORS[ci[0]]] if rng.uniform() < 0.6 else [COLORS[ci[0]], COLORS[ci[1]]]
+                    self.rockets.append([x0, y0, zx, zy, 0.0, 0.8 + 0.5 * abs(y0 - zy) / H, kind, R, [], cols])
                     self.next_fw = t + rng.uniform(2.5, 4.0)
 
         alive = []
@@ -439,7 +539,7 @@ class Love:
             rk[8].append((x, y))
             del rk[8][:-14]
             if p >= 1.0:
-                self._explode(x, y, rk[6], rk[7])
+                self._explode(x, y, rk[6], rk[7], rk[9])
                 self.fw_booms.append(t)
             else:
                 alive.append(rk)
@@ -453,6 +553,9 @@ class Love:
             s[1] += s[3] * dt
             s[4] += dt
         self.fwp = [s for s in self.fwp if s[4] < s[5]]
+        for f in self.flashes:
+            f[2] += dt
+        self.flashes = [f for f in self.flashes if f[2] < 0.35]
 
         for em in self.embers:
             em[4] += dt
@@ -462,7 +565,7 @@ class Love:
         self.embers = [em for em in self.embers if em[4] < em[5]]
 
         if self.star is None:
-            if t > 6 and t >= self.next_star:
+            if t > T_FX + 2 and t >= self.next_star:
                 ang = rng.uniform(0.35, 0.6)
                 sgn = 1 if rng.uniform() < 0.5 else -1
                 self.star = [rng.uniform(0.15, 0.85) * W, rng.uniform(0.02, 0.22) * H,
@@ -477,8 +580,6 @@ class Love:
 
     def _extra_points(self):
         xs, ys, ws = [], [], []
-        for s in self.fwp:
-            xs.append(s[0]); ys.append(s[1]); ws.append(self._spark_alpha(s) * 1.3)
         for e in self.embers:
             f = e[4] / e[5]
             a = 0.85 * (1 - f) ** 1.3 * (0.7 + 0.3 * math.sin(e[4] * 6 + e[6])) * min(1.0, e[4] / 0.15)
@@ -502,12 +603,16 @@ class Love:
         for rk in self.rockets:
             tr = rk[8]
             for i in range(len(tr) - 1):
-                pygame.draw.line(lay, grey(255 * 0.35 * i / len(tr)), tr[i], tr[i + 1])
+                pygame.draw.line(lay, tint(rk[9][0], 0.45 * i / len(tr)), tr[i], tr[i + 1])
             if tr:
                 pygame.draw.circle(lay, grey(200), tr[-1], 1)
         for s in self.fwp:
-            c = grey(255 * self._spark_alpha(s) * 0.5)
+            c = tint(s[10], self._spark_alpha(s) * 0.6)
             pygame.draw.line(lay, c, (s[0] - s[2] * 0.06, s[1] - s[3] * 0.06), (s[0], s[1]))
+
+        for fx, fy, fl, fR, fc in self.flashes:  # kilatan warna saat meledak
+            pr = fl / 0.35
+            pygame.draw.circle(lay, tint(fc, 0.22 * (1 - pr)), (fx, fy), int(fR * 0.5 * math.sqrt(pr)) + 2)
 
         # bintang jatuh
         if self.star:
@@ -581,10 +686,10 @@ class Love:
             p = (self.t % BEAT_PERIOD) / BEAT_PERIOD
             tick = p < self.prev_p  # awal detak baru
             self.prev_p = p
-            b = (gauss(p, 0.1, 0.06) + 0.65 * gauss(p, 0.3, 0.07)) * float(smooth(self.t / 2.5))
+            b = (gauss(p, 0.1, 0.06) + 0.65 * gauss(p, 0.3, 0.07)) * float(smooth((self.t - T_BEAT) / 2.5))
             bs = 1 + 0.04 * b + 0.006 * math.sin(self.t * 0.5)
-            rv = float(smooth((self.t - 2.4) / 3))
-            rv2 = float(smooth((self.t - 3.2) / 2.5))
+            rv = float(smooth((self.t - T_RV) / 2.4))
+            rv2 = float(smooth((self.t - T_RV2) / 2.2))
             self.update(dt, bs, tick)
             self.draw(b, bs, rv, rv2)
 
